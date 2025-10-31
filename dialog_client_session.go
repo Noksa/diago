@@ -162,8 +162,8 @@ func (d *DialogClientSession) Invite(ctx context.Context, opts InviteClientOptio
 				return fmt.Errorf("failed to apply originator sdp: %w", err)
 			}
 			// We do not want originator to be remote side, but we want to apply codec filtering
-			sess.SetRemoteAddr(&net.UDPAddr{})
-
+			sess.SetRemoteRTPAddr(&net.UDPAddr{})
+			sess.SetRemoteRTCPAddr(&net.UDPAddr{})
 			// Now to totally remove transcoding a chance. Leave only one codec of different types
 			audioCodec := media.Codec{}
 			telEventCodec := media.Codec{}

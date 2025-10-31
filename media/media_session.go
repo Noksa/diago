@@ -161,13 +161,14 @@ func (s *MediaSession) Init() error {
 	return nil
 }
 
-func (s *MediaSession) InitWithListeners(lRTP net.PacketConn, lRTCP net.PacketConn, raddr *net.UDPAddr) {
+func (s *MediaSession) InitWithListeners(lRTP net.PacketConn, lRTCP net.PacketConn, raddr *net.UDPAddr, rRtcpAddr *net.UDPAddr) {
 	s.Mode = sdp.ModeSendrecv
 	s.rtpConn = lRTP
 	s.rtcpConn = lRTCP
-	laddr, port, _ := sip.ParseAddr(lRTCP.LocalAddr().String())
+	laddr, port, _ := sip.ParseAddr(lRTP.LocalAddr().String())
 	s.Laddr = net.UDPAddr{IP: net.ParseIP(laddr), Port: port}
-	s.SetRemoteAddr(raddr)
+	s.SetRemoteRTPAddr(raddr)
+	s.SetRemoteRTCPAddr(rRtcpAddr)
 }
 
 // InitWithSDP allows creating media session with own SDP and bypassing other needs
@@ -245,15 +246,16 @@ func (s *MediaSession) Close() error {
 	return errors.Join(e1, e2)
 }
 
-// SetRemoteAddr is helper to set Raddr and rtcp address.
+// SetRemoteRTPAddr is helper to set Raddr and rtcp address.
 // It is not thread safe
-func (s *MediaSession) SetRemoteAddr(raddr *net.UDPAddr) {
+func (s *MediaSession) SetRemoteRTPAddr(raddr *net.UDPAddr) {
 	s.Raddr = *raddr
-	s.rtcpRaddr = net.UDPAddr{
-		IP:   raddr.IP,
-		Port: raddr.Port + 1,
-		Zone: raddr.Zone,
-	}
+}
+
+// SetRemoteRTCPAddr is helper to set Raddr and rtcp address.
+// It is not thread safe
+func (s *MediaSession) SetRemoteRTCPAddr(raddr *net.UDPAddr) {
+	s.rtcpRaddr = *raddr
 }
 
 // LocalSDP generates SDP based on local settings and remote SDP
@@ -266,6 +268,10 @@ func (s *MediaSession) LocalSDP() []byte {
 
 	ip := s.Laddr.IP
 	rtpPort := s.Laddr.Port
+	rtcpPort := rtpPort + 1
+	if s.rtcpConn != nil {
+		rtcpPort = s.rtcpConn.LocalAddr().(*net.UDPAddr).Port
+	}
 	connIP := s.ExternalIP
 	if connIP == nil {
 		connIP = ip
@@ -325,7 +331,7 @@ func (s *MediaSession) LocalSDP() []byte {
 		}
 	}
 
-	return generateSDPForAudio(rtpProfile, ip, connIP, rtpPort, s.Mode, codecs, localSDES)
+	return generateSDPForAudio(rtpProfile, ip, connIP, rtpPort, rtcpPort, s.Mode, codecs, localSDES)
 }
 
 // RemoteSDP applies remote SDP.
@@ -427,7 +433,8 @@ func (s *MediaSession) RemoteSDP(sdpReceived []byte) error {
 		return fmt.Errorf("remote requested secure RTP, but no context is created proto=%s", md.Proto)
 	}
 
-	s.SetRemoteAddr(&net.UDPAddr{IP: ci.IP, Port: md.Port})
+	s.SetRemoteRTPAddr(&net.UDPAddr{IP: ci.IP, Port: md.Port})
+	s.SetRemoteRTCPAddr(&net.UDPAddr{IP: ci.IP, Port: md.RtcpPort})
 	return nil
 }
 
@@ -507,12 +514,13 @@ func (s *MediaSession) listenRTPandRTCP(laddr *net.UDPAddr) error {
 	}
 	laddr = s.rtpConn.LocalAddr().(*net.UDPAddr)
 
-	s.rtcpConn, err = net.ListenUDP("udp", &net.UDPAddr{IP: laddr.IP, Port: laddr.Port + 1})
+	// use random RTCP port
+	s.rtcpConn, err = net.ListenUDP("udp", &net.UDPAddr{IP: laddr.IP, Port: 0})
 	if err != nil {
 		s.rtpConn.Close()
 		return err
 	}
-
+	//s.rtcpLaddr = *s.rtcpConn.LocalAddr().(*net.UDPAddr)
 	// Update laddr as it can be empheral
 	s.Laddr = *laddr
 	return nil
@@ -788,7 +796,7 @@ type sdesInline struct {
 	tag    int
 }
 
-func generateSDPForAudio(rtpProfile string, originIP net.IP, connectionIP net.IP, rtpPort int, mode string, codecs []Codec, sdes sdesInline) []byte {
+func generateSDPForAudio(rtpProfile string, originIP net.IP, connectionIP net.IP, rtpPort int, rtcpPort int, mode string, codecs []Codec, sdes sdesInline) []byte {
 	ntpTime := GetCurrentNTPTimestamp()
 
 	fmts := make([]string, len(codecs))
@@ -832,6 +840,8 @@ func generateSDPForAudio(rtpProfile string, originIP net.IP, connectionIP net.IP
 		"a=ptime:20", // Needed for opus
 		"a=maxptime:20",
 		"a="+string(mode))
+
+	s = append(s, fmt.Sprintf("a=rtcp:%d IN IP4 %s", rtcpPort, connectionIP))
 
 	if sdes.alg != "" {
 		s = append(s, fmt.Sprintf("a=crypto:%d %s inline:%s", sdes.tag, sdes.alg, sdes.base64))

@@ -384,6 +384,7 @@ func (s *RTPSession) MonitorBackground() error {
 	go func() {
 		sess := s.Sess
 		log.Debug("RTCP writer started", "raddr", sess.rtcpRaddr.String())
+		return
 		for {
 			var now time.Time
 			select {
@@ -416,7 +417,7 @@ func (s *RTPSession) readRTCP() error {
 		n, err := sess.ReadRTCP(buf, rtcpBuf)
 		if err != nil {
 			if errors.Is(err, errRTCPFailedToUnmarshal) {
-				DefaultLogger().Error("RTCP Unmarshal error. Continue listen", "error", err)
+				DefaultLogger().Debug("RTCP Unmarshal error. Continue listen", "error", err)
 				continue
 			}
 			return err

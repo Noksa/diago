@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,7 @@ type MediaDescription struct {
 	MediaType string
 
 	Port        int
+	RtcpPort    int
 	PortNumbers int
 
 	Proto string
@@ -61,9 +63,9 @@ func (m *MediaDescription) String() string {
 
 func (sd SessionDescription) MediaDescription(mediaType string) (MediaDescription, error) {
 	values := sd.Values("m")
-
+	aValues := sd.Values("a")
 	md := MediaDescription{}
-	var v string
+	var v, rtcpPortStringValue string
 	for _, val := range values {
 		ind := strings.Index(val, " ")
 		if ind < 1 {
@@ -74,6 +76,14 @@ func (sd SessionDescription) MediaDescription(mediaType string) (MediaDescriptio
 			v = val
 			break
 		}
+	}
+	for _, val := range aValues {
+		if !strings.Contains(val, "rtcp:") {
+			continue
+		}
+		regex := regexp.MustCompile("rtcp:\\d+")
+		rtcpPortStringValue = strings.Split(regex.FindString(val), ":")[1]
+		break
 	}
 
 	if v == "" {
@@ -92,6 +102,10 @@ func (sd SessionDescription) MediaDescription(mediaType string) (MediaDescriptio
 	md.Port, _ = strconv.Atoi(ports[0])
 	if len(ports) > 1 {
 		md.PortNumbers, _ = strconv.Atoi(ports[1])
+	}
+	md.RtcpPort = md.Port + 1
+	if rtcpPortStringValue != "" {
+		md.RtcpPort, _ = strconv.Atoi(rtcpPortStringValue)
 	}
 
 	md.Proto = fields[2]
