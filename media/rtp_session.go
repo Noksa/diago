@@ -384,7 +384,6 @@ func (s *RTPSession) MonitorBackground() error {
 	go func() {
 		sess := s.Sess
 		log.Debug("RTCP writer started", "raddr", sess.rtcpRaddr.String())
-		return
 		for {
 			var now time.Time
 			select {
