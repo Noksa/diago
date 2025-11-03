@@ -406,7 +406,12 @@ func NewDiago(ua *sipgo.UserAgent, opts ...DiagoOption) *Diago {
 				return
 
 			}
-			tx.Respond(sip.NewResponseFromRequest(req, sip.StatusBadRequest, err.Error(), nil))
+			// workaround
+			// TODO - after fix remove it
+			res := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil)
+			tx.Respond(res)
+			return
+			tx.Respond(sip.NewResponseFromRequest(req, sip.StatusBadRequest, "OK", nil))
 			return
 		}
 
