@@ -213,6 +213,7 @@ func (d *DialogClientSession) Invite(ctx context.Context, opts InviteClientOptio
 	inviteReq.SetBody(sess.LocalSDP())
 
 	// We allow changing full from header, but we need to make sure it is correctly set
+	// If users specify 'tag' parameter it is assumed that they know what they do
 	if fromHDR := inviteReq.From(); fromHDR != nil && !fromHDR.Params.Has("tag") {
 		fromHDR.Params["tag"] = sip.GenerateTagN(16)
 	}
