@@ -39,6 +39,10 @@ var (
 	//
 	// Experimental
 	RTPProfileSAVPDisable = false
+
+	// RTPNAT options
+	RTPNATDisabled = 0
+	RTPNATSymetric = 1
 )
 
 func logRTPRead(m *MediaSession, raddr net.Addr, p *rtp.Packet) {
@@ -118,8 +122,14 @@ type MediaSession struct {
 	remoteCtxSRTP *srtp.Context
 	srtpRemoteTag int
 
-	// TODO: Support RTP Symetric
-	rtpSymetric bool
+	// RTP NAT enables handling RTP behind NAT. Checkout also RTPSourceLock
+	RTPNAT          int // 0 - disabled, 1 - Learn source change (RTP Symetric)
+	learnedRTPFrom  atomic.Pointer[net.UDPAddr]
+	learnedRTCPFrom atomic.Pointer[net.UDPAddr]
+
+	// ReadRTPFromAddr is set after Read operation. NOT THREAD SAFE and should be only used together with Read
+	// It can be used to validate source of RTP packet
+	ReadRTPFromAddr net.Addr
 }
 
 func NewMediaSession(ip net.IP, port int) (s *MediaSession, e error) {
@@ -229,6 +239,7 @@ func (s *MediaSession) Fork() *MediaSession {
 		rtcpConn: s.rtcpConn,
 		Codecs:   slices.Clone(s.Codecs),
 		Mode:     sdp.ModeSendrecv,
+		RTPNAT:   s.RTPNAT,
 		sdp:      slices.Clone(s.sdp),
 	}
 	return &cp
@@ -561,12 +572,29 @@ func (m *MediaSession) ReadRTP(buf []byte, pkt *rtp.Packet) (int, error) {
 		}
 	}
 
-	// Problem is that this buffer is refferenced in rtp PACKET
-	// if err := pkt.Unmarshal(buf[:n]); err != nil {
-	// 	return err
-	// }
-
 	logRTPRead(m, from, pkt)
+	m.ReadRTPFromAddr = from
+
+	// Handle NAT
+	if m.RTPNAT == 1 && from.String() != m.Raddr.String() {
+		// Moving this to RTP session could have simplify validation (sequence tracking), but for now here is more easier to maintain
+		func() {
+			// Make sure it is valid pkt
+			if pkt.Version != 2 {
+				return
+			}
+
+			fromAddr, ok := from.(*net.UDPAddr)
+			if !ok {
+				return
+			}
+
+			if m.learnedRTPFrom.CompareAndSwap(nil, fromAddr) {
+				// Allow only first swap, rest is ignored
+				DefaultLogger().Debug("RTP NAT switch to new source", "addr", from.String())
+			}
+		}()
+	}
 	return n, err
 }
 
@@ -597,7 +625,12 @@ func (m *MediaSession) readRTPParsed() (rtp.Packet, error) {
 // }
 
 func (m *MediaSession) ReadRTPRaw(buf []byte) (int, error) {
-	n, _, err := m.rtpConn.ReadFrom(buf)
+	n, from, err := m.rtpConn.ReadFrom(buf)
+
+	if m.RTPNAT == 1 {
+		addr, _ := from.(*net.UDPAddr)
+		m.learnedRTPFrom.Store(addr)
+	}
 	return n, err
 }
 
@@ -609,7 +642,7 @@ func (m *MediaSession) ReadRTPRawDeadline(buf []byte, t time.Time) (int, error) 
 // ReadRTCP is optimized reads and unmarshals RTCP packets. Buffers is only used for unmarshaling.
 // Caller needs to be aware of size this buffer and allign with MTU
 func (m *MediaSession) ReadRTCP(buf []byte, pkts []rtcp.Packet) (n int, err error) {
-	nn, err := m.ReadRTCPRaw(buf)
+	nn, from, err := m.ReadRTCPRaw(buf)
 	if err != nil {
 		return n, err
 	}
@@ -627,18 +660,38 @@ func (m *MediaSession) ReadRTCP(buf []byte, pkts []rtcp.Packet) (n int, err erro
 		return 0, err
 	}
 
+	if m.RTPNAT == 1 && from.String() != m.rtcpRaddr.String() {
+		func() {
+			fromAddr, ok := from.(*net.UDPAddr)
+			if !ok {
+				return
+			}
+			rtcpA := m.learnedRTCPFrom.Load()
+			if rtcpA != nil {
+				// learned
+				return
+			}
+			rtpA := m.learnedRTPFrom.Load()
+
+			// Switch RTCP if RTP switched?
+			if rtpA != nil {
+				DefaultLogger().Debug("RTCP New Source Learned", "addr", from.String())
+				m.learnedRTCPFrom.Store(fromAddr)
+			}
+		}()
+	}
+
 	logRTCPRead(m, pkts[:n])
 	return n, err
 }
 
-func (m *MediaSession) ReadRTCPRaw(buf []byte) (int, error) {
+func (m *MediaSession) ReadRTCPRaw(buf []byte) (int, net.Addr, error) {
 	if m.rtcpConn == nil {
 		// just block
 		select {}
 	}
-	n, _, err := m.rtcpConn.ReadFrom(buf)
-
-	return n, err
+	n, a, err := m.rtcpConn.ReadFrom(buf)
+	return n, a, err
 }
 
 func (m *MediaSession) ReadRTCPRawDeadline(buf []byte, t time.Time) (int, error) {
@@ -688,7 +741,14 @@ func (m *MediaSession) getWriteBuf() []byte {
 }
 
 func (m *MediaSession) WriteRTPRaw(data []byte) (n int, err error) {
-	n, err = m.rtpConn.WriteTo(data, &m.Raddr)
+	addr := &m.Raddr
+	if m.RTPNAT == 1 {
+		if a := m.learnedRTPFrom.Load(); a != nil {
+			addr = a
+		}
+	}
+
+	n, err = m.rtpConn.WriteTo(data, addr)
 	return
 }
 
@@ -751,7 +811,14 @@ func (m *MediaSession) WriteRTCPs(pkts []rtcp.Packet) error {
 }
 
 func (m *MediaSession) WriteRTCPRaw(data []byte) (int, error) {
-	n, err := m.rtcpConn.WriteTo(data, &m.rtcpRaddr)
+	addr := &m.rtcpRaddr
+	if m.RTPNAT == 1 {
+		if a := m.learnedRTCPFrom.Load(); a != nil {
+			addr = a
+		}
+	}
+
+	n, err := m.rtcpConn.WriteTo(data, addr)
 	return n, err
 }
 
@@ -827,10 +894,10 @@ func generateSDPForAudio(rtpProfile string, originIP net.IP, connectionIP net.IP
 	// TODO optimize this with string builder
 	s := []string{
 		"v=0",
-		fmt.Sprintf("o=- %d %d IN IP4 %s", ntpTime, ntpTime, originIP),
+		fmt.Sprintf("o=- %d %d IN %s %s", ntpTime, ntpTime, sdpIP(originIP), originIP),
 		"s=Sip Go Media",
 		// "b=AS:84",
-		fmt.Sprintf("c=IN IP4 %s", connectionIP),
+		fmt.Sprintf("c=IN %s %s", sdpIP(connectionIP), connectionIP),
 		"t=0 0",
 		fmt.Sprintf("m=audio %d %s %s", rtpPort, rtpProfile, strings.Join(fmts, " ")),
 	}
@@ -893,4 +960,11 @@ func generateMasterKeySalt(profile srtp.ProtectionProfile) ([]byte, int, error) 
 		return nil, 0, err
 	}
 	return buf, keyLen, nil
+}
+
+func sdpIP(ip net.IP) string {
+	if ip.To4() == nil {
+		return "IP6"
+	}
+	return "IP4"
 }

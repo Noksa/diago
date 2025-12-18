@@ -23,9 +23,9 @@ import (
 
 var (
 	HTTPDebug = os.Getenv("HTTP_DEBUG") == "true"
-	// TODO remove client singleton
-	client = http.Client{
-		Timeout: 10 * time.Second,
+
+	DefaultPlaybackHTTPClient = http.Client{
+		Timeout: 20 * time.Second,
 	}
 
 	errNoRTPSession = errors.New("no rtp session")
@@ -33,7 +33,7 @@ var (
 
 func init() {
 	if HTTPDebug {
-		client.Transport = &loggingTransport{}
+		DefaultPlaybackHTTPClient.Transport = &loggingTransport{}
 	}
 }
 
@@ -165,6 +165,7 @@ func (d *DialogMedia) initMediaSessionFromConf(conf MediaConfig) error {
 		Mode:       sdp.ModeSendrecv,
 		SecureRTP:  conf.secureRTP,
 		SRTPAlg:    conf.SecureRTPAlg,
+		RTPNAT:     conf.rtpNAT,
 	}
 
 	if err := sess.Init(); err != nil {

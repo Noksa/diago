@@ -145,6 +145,7 @@ type MediaConfig struct {
 	secureRTP  int // 0 - none, 1 - sdes
 	bindIP     net.IP
 	externalIP net.IP
+	rtpNAT     int
 
 	// TODO, For now it is global on media package
 	// RTPPortStart int
@@ -250,7 +251,7 @@ func NewDiago(ua *sipgo.UserAgent, opts ...DiagoOption) *Diago {
 
 	server.OnInvite(errHandler(func(req *sip.Request, tx sip.ServerTransaction) error {
 		// What if multiple server transports?
-		id, err := sip.UASReadRequestDialogID(req)
+		id, err := sip.DialogIDFromRequestUAS(req)
 		if err == nil {
 			return dg.handleReInvite(req, tx, id)
 		}
@@ -440,7 +441,7 @@ func (dg *Diago) handleReInvite(req *sip.Request, tx sip.ServerTransaction, id s
 	// No Error means we have ID
 	s, err := dg.cache.server.DialogLoad(ctx, id)
 	if err != nil {
-		id, err := sip.UACReadRequestDialogID(req)
+		id, err := sip.DialogIDFromRequestUAC(req)
 		if err != nil {
 			dg.log.Info("Reinvite failed to read request dialog ID", "error", err)
 			return tx.Respond(sip.NewResponseFromRequest(req, sip.StatusBadRequest, "Bad Request", nil))
@@ -610,8 +611,6 @@ type NewDialogOptions struct {
 	Transport string
 	// TransportID matches diago transport by ID instead protocol
 	TransportID string
-
-	// Codecs []media.Codec
 }
 
 // NewDialog creates a new client dialog session after you can perform dialog Invite
