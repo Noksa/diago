@@ -514,10 +514,13 @@ func (s *RTPSession) readReceptionReport(rr rtcp.ReceptionReport, now time.Time)
 	// https://tools.ietf.org/html/rfc3550#page-39
 	// Round trip time
 	if rr.LastSenderReport != 0 {
-		var skewed bool
-		s.readStats.RTT, skewed = calcRTT(now, rr.LastSenderReport, rr.Delay)
+		rtt, skewed := calcRTT(now, rr.LastSenderReport, rr.Delay)
 		if skewed {
-			DefaultLogger().Warn("Internal RTCP clock skew detected", "ssrc", rr.SSRC, "rtt", s.readStats.RTT.String())
+			// Negative RTT is a few ms of DLSR/clock measurement error on LAN, not
+			// an 18h offset. Keep the last good sample; PJSIP logs this at trace.
+			DefaultLogger().Debug("Internal RTCP clock skew detected", "ssrc", rr.SSRC)
+		} else {
+			s.readStats.RTT = rtt
 		}
 	}
 	// used to calc fraction lost
@@ -636,7 +639,7 @@ func (s *RTPSession) parseReceptionReport(receptionReport *rtcp.ReceptionReport,
 		LastSequenceNumber: uint32(sequenceCycles)<<16 + uint32(readStats.LastSequenceNumber),
 		Jitter:             uint32(readStats.jitter),                    // TODO
 		LastSenderReport:   uint32(readStats.lastSenderReportNTP >> 16), // LSR
-		Delay:              uint32(delay.Seconds() * 65356),             // DLSR
+		Delay:              uint32(delay.Seconds() * ntpCompactUnit),    // DLSR
 	}
 }
 
@@ -644,16 +647,22 @@ func FractionLostFloat(f uint8) float64 {
 	return float64(f) / 256
 }
 
+// ntpCompactUnit is RFC 3550 compact NTP / DLSR resolution: 1/65536 second.
+const ntpCompactUnit = 65536
+
 func calcRTT(now time.Time, lastSenderReport uint32, delaySenderReport uint32) (rtt time.Duration, skewed bool) {
 	nowNTP := NTPTimestamp(now)
 	now32 := uint32(nowNTP >> 16) // LSR is middle 32 bits of NTP timestamp
 
+	// RFC 3550: RTT = A - LSR - DLSR. Compact NTP is unsigned 32-bit and wraps
+	// every 65536s (~18h12m16s). A negative result is measurement error, not wrap.
+	if now32-delaySenderReport < lastSenderReport {
+		return 0, true
+	}
+
 	rtt32 := now32 - lastSenderReport - delaySenderReport
-	skewed = now32-delaySenderReport < lastSenderReport
-
-	secs := rtt32 & 0xFFFF0000 >> 16           // higher 16 bits
-	fracs := float64(rtt32&0x0000FFFF) / 65356 // lower 16 bits
+	secs := rtt32 >> 16
+	fracs := float64(rtt32&0xFFFF) / ntpCompactUnit
 	rtt = time.Duration(secs)*time.Second + time.Duration(fracs*float64(time.Second))
-
-	return
+	return rtt, false
 }

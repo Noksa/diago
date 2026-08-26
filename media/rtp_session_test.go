@@ -251,11 +251,28 @@ func TestRTTCalc(t *testing.T) {
 	assert.False(t, skewed)
 	assert.Equal(t, 6*time.Second, dur)
 
-	dur, skewed = calcRTT(now, lsr, 5*65356) // Delay was 5 second
+	dur, skewed = calcRTT(now, lsr, 5*ntpCompactUnit) // Delay was 5 second
 	assert.False(t, skewed)
 	// Due to dividing this can not be exact
 	assert.GreaterOrEqual(t, dur, 1*time.Second)
 	assert.LessOrEqual(t, dur, 1*time.Second+20*time.Millisecond)
+}
+
+func TestRTTCalcClockSkewDoesNotWrapToEighteenHours(t *testing.T) {
+	now := time.Now()
+	// LSR a few ms in the future of now: the condition that used to underflow
+	// compact NTP and report rtt≈18h12m16s.
+	lsr := uint32(NTPTimestamp(now.Add(4*time.Millisecond)) >> 16)
+
+	dur, skewed := calcRTT(now, lsr, 0)
+	assert.True(t, skewed)
+	assert.Equal(t, time.Duration(0), dur)
+
+	lsr = uint32(NTPTimestamp(now.Add(-1*time.Millisecond)) >> 16)
+	dlsr := uint32(10 * ntpCompactUnit / 1000) // 10ms DLSR > 1ms elapsed
+	dur, skewed = calcRTT(now, lsr, dlsr)
+	assert.True(t, skewed)
+	assert.Equal(t, time.Duration(0), dur)
 }
 
 func TestJitterCalc(t *testing.T) {
